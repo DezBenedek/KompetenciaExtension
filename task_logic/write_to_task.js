@@ -43,17 +43,23 @@ async function selectDragDropAnswer(dragDiv, dropDiv) {
         clientX: startX,
         clientY: startY
     }));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    
     // needed to initiate dragging motion
     document.dispatchEvent(new MouseEvent('mousemove', {    
         bubbles: true,
-        clientX: startX + 100,
-        clientY: startY + 100
+        clientX: startX + 10,
+        clientY: startY + 10
     }));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    
     document.dispatchEvent(new MouseEvent('mousemove', {
         bubbles: true,
         clientX: endX,
         clientY: endY
     }));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    
     dropDiv.dispatchEvent(new MouseEvent('mouseup', {
         bubbles: true,
         clientX: endX,
@@ -82,11 +88,18 @@ async function findDragDivFromID(dragID) {
 }
 
 async function waitForDropAnimation(dropDiv) {
+    const startTime = Date.now();
+    const maxWaitTime = 5000; // 5 second timeout
+    
     while (
         dropDiv.classList.contains('cdk-drop-list-receiving') ||
         dropDiv.classList.contains('cdk-drop-list-dragging') ||
         dropDiv.classList.contains('cdk-drag-animating')
     ) {
+        if (Date.now() - startTime > maxWaitTime) {
+            debugLog('waitForDropAnimation timeout exceeded');
+            break;
+        }
         await new Promise(resolve => setTimeout(resolve, 50)); // wait for the drag and drop animation to complete
     }
     await new Promise(resolve => setTimeout(resolve, 100)); // extra buffer wait
@@ -107,60 +120,67 @@ async function writeAnswers(task, answerFields, answersToWrite) {
     await waitForLoadingScreen();
 
     let oldZoom = -1;
-    for (let i=0;i<answerFields.length;i++)
-    {
-        let currentInput = answerFields[i];
-        let currentToWrite = answersToWrite[i];
+    try {
+        for (let i=0;i<answerFields.length;i++)
+        {
+            let currentInput = answerFields[i];
+            let currentToWrite = answersToWrite[i];
 
-        //no need to write if we have same answer or the toWrite is empty
-        if (!currentToWrite || currentInput.value === currentToWrite) continue;
-        
-        let taskType = currentInput.type;
-        switch (taskType) {
-        case 'select':
-            selectMultiChoiceAnswer(currentInput.element);
-            break;
-        case 'dropdown':
-            selectDropdownOption(currentInput.element, currentToWrite);
-            break;
-        case 'customNumber':
-            selectCustomNumberAnswer(currentInput.element, currentToWrite);
-            break;
-        case 'dragDrop':
-            blockUserInteraction();
-            let fails = 0;
-            let succeeded = false;
-            //retry up to 5 times, as this one often fails
-            while(!succeeded && fails < 5) {
-                let dragDiv = await findDragDivFromID(currentToWrite);
-                if (dragDiv === null) {
-                    debugLog('Drag element not found with this ID:', currentToWrite);
-                    break;
+            //no need to write if we have same answer or the toWrite is empty
+            if (!currentToWrite || currentInput.value === currentToWrite) continue;
+            
+            let taskType = currentInput.type;
+            switch (taskType) {
+            case 'select':
+                selectMultiChoiceAnswer(currentInput.element);
+                break;
+            case 'dropdown':
+                selectDropdownOption(currentInput.element, currentToWrite);
+                break;
+            case 'customNumber':
+                selectCustomNumberAnswer(currentInput.element, currentToWrite);
+                break;
+            case 'dragDrop':
+                blockUserInteraction();
+                let fails = 0;
+                let succeeded = false;
+                //retry up to 5 times, as this one often fails
+                while(!succeeded && fails < 5) {
+                    let dragDiv = await findDragDivFromID(currentToWrite);
+                    if (dragDiv === null) {
+                        debugLog('Drag element not found with this ID:', currentToWrite);
+                        break;
+                    }
+                    // because scrolling to elements messes up coords for some reason
+                    if (oldZoom === -1) oldZoom = zoomOut(); //only zoom out once, not separately for each answer
+                    
+                    let dropDiv = currentInput.element;
+                    unblockUserInteraction(); // so the auto inputs go through
+                    await selectDragDropAnswer(dragDiv, dropDiv);
+                    blockUserInteraction(); // because the user could still fuck up the animation with a click
+
+                    await waitForDropAnimation(dropDiv);
+                    
+                    await checkDragSuccess(dropDiv) ? succeeded = true : fails++;
                 }
-                // because scrolling to elements messes up coords for some reason
-                if (oldZoom === -1) oldZoom = zoomOut(); //only zoom out once, not separately for each answer
-                
-                let dropDiv = currentInput.element;
-                unblockUserInteraction(); // so the auto inputs go through
-                await selectDragDropAnswer(dragDiv, dropDiv);
-                blockUserInteraction(); // because the user could still fuck up the animation with a click
-
-                await waitForDropAnimation(dropDiv);
-                
-                await checkDragSuccess(dropDiv) ? succeeded = true : fails++;
+                break;
+            default:
+                debugLog('unknown taskType in writeAnswers: ', taskType);
+                new taskStatus('unknown taskType in writeAnswers: ' + taskType, 'error');
+                break;
+        }
+        }
+    } finally {
+        try {
+            if (oldZoom !== -1) {
+                zoomIn(oldZoom); // zoom back in if we zoomed out for dragDrop
             }
-            break;
-        default:
-            debugLog('unknown taskType in writeAnswers: ', taskType);
-            new taskStatus('unknown taskType in writeAnswers: ' + taskType, 'error');
-            break;
-    }
-    }
-    if (oldZoom !== -1) {
-        zoomIn(oldZoom); // zoom back in if we zoomed out for dragDrop
-    }
 
-    await updateSelectedAnswers(task);
-
-    unblockUserInteraction();
+            await updateSelectedAnswers(task);
+        } catch (error) {
+            debugLog('Error in writeAnswers finally block:', error);
+        } finally {
+            unblockUserInteraction();
+        }
+    }
 }

@@ -52,7 +52,7 @@ export class taskStatus {
 
     set_text(text) {
         this.text = text;
-        this.element.innerHTML = `${text}`;
+        this.element.textContent = text;
     }
 
 
@@ -65,7 +65,7 @@ export class taskStatus {
      */
     succeed({text = this.text, color = 'rgba(34, 170, 34, 0.9)', stayTime = 500, fadeTime = 500} = {}) {
         this.state = 'done';
-        this.element.innerHTML = `${text}`;
+        this.element.textContent = text;
         this.element.style.background = color;
         if (stayTime !== -1 && fadeTime !== -1) {
             setTimeout(() => {
@@ -88,7 +88,7 @@ export class taskStatus {
     error({text = this.text, color = 'rgba(170,34,34,0.9)', stayTime = 4000, fadeTime = 2000} = {}) {
         this.element.style.pointerEvents = 'auto';
         this.state = 'error';
-        this.element.innerHTML = `${text}`;
+        this.element.textContent = text;
         this.element.style.background = color;
         if (stayTime !== -1 && fadeTime !== -1) {
             setTimeout(() => {

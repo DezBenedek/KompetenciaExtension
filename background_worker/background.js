@@ -14,12 +14,12 @@ chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === chrome.runtime.OnInstalledReason.INSTALL) {
     // Generate and store unique installation key
     const installationKey = generateInstallationKey();
-    chrome.storage.sync.set({ installationKey: installationKey }, () => {
+    chrome.storage.sync.set({ 
+        installationKey: installationKey,
+        lastAnnouncement: new Date().toISOString()
+    }, () => {
       console.log('Installation key generated:', installationKey);
     });
-    chrome.storage.sync.set({
-      lastAnnouncement: new Date().toISOString()
-    })
   }
 });
 

@@ -77,11 +77,11 @@ function getAnswerFields(selector, type, idGenerator = null) {
     return Promise.all(fields.map(async field => new answerField(type, field, false, idGenerator ? await idGenerator(field) : '')));
 }
 
-function getUserID() {
+async function getUserID() {
     const url = window.location.href;
     const match = url.match(/[?&]azon=([^&%]+)/); // regex matches 'azon' parameter until a % character, expecting azon=A111-B222%2F...
     if (match && match[1]) {
-        return hashSHA256(decodeURIComponent(match[1]));
+        return await hashSHA256(decodeURIComponent(match[1]));
     }
     return "";
 }
