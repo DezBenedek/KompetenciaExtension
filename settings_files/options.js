@@ -7,6 +7,21 @@ let apiMinValues = {
     votepercentage: 0.0
 };
 
+function getSelectedAiModel() {
+    const modelChoice = document.getElementById('ai-model-choice').value;
+    const customModel = document.getElementById('ai-model-custom').value.trim();
+    if (modelChoice === 'custom') {
+        return customModel || defaultOptions.aiModel;
+    }
+    return modelChoice;
+}
+
+function toggleCustomModelInput() {
+    const modelChoice = document.getElementById('ai-model-choice').value;
+    const customInput = document.getElementById('ai-model-custom');
+    customInput.disabled = modelChoice !== 'custom';
+}
+
 /**
  * Fetch minimum settings from the API based on the configured URL
  */
@@ -61,12 +76,25 @@ function updateMinimumDisplay() {
 
 function saveOptions() {
 
+    const modelChoice = document.getElementById('ai-model-choice').value;
+    const customModel = document.getElementById('ai-model-custom').value.trim();
+    if (modelChoice === 'custom' && !customModel) {
+        alert('Egyedi modell választásakor add meg a modell azonosítóját is.');
+        return;
+    }
+
     const options = {
         minvotes: parseInt(document.getElementById('minvotes').value),
         votepercentage: parseInt(document.getElementById('votepercentage').value) / 100.0,
         contributer: document.getElementById('contributer').checked,
         url: document.getElementById('url').value,
         autoComplete: document.getElementById('auto-complete').checked,
+        aiFallbackEnabled: document.getElementById('ai-fallback-enabled').checked,
+        aiAskBeforeFallback: document.getElementById('ai-ask-before-fallback').checked,
+        openRouterApiKey: document.getElementById('openrouter-api-key').value.trim(),
+        aiModelChoice: modelChoice,
+        aiModelCustom: customModel,
+        aiModel: getSelectedAiModel(),
         isSetupComplete: true
     };
     // Validate against API minimums
@@ -129,6 +157,22 @@ function restoreOptions() {
         }
         else document.getElementById('url').value = items.url;
         document.getElementById('auto-complete').checked = items.autoComplete;
+        document.getElementById('ai-fallback-enabled').checked = !!items.aiFallbackEnabled;
+        document.getElementById('ai-ask-before-fallback').checked = !!items.aiAskBeforeFallback;
+        document.getElementById('openrouter-api-key').value = items.openRouterApiKey || items.geminiApiKey || '';
+
+        const modelChoice = items.aiModelChoice || items.aiModel || defaultOptions.aiModel;
+        const modelChoiceSelect = document.getElementById('ai-model-choice');
+        const hasPreset = Array.from(modelChoiceSelect.options).some(opt => opt.value === modelChoice);
+        if (hasPreset) {
+            modelChoiceSelect.value = modelChoice;
+            document.getElementById('ai-model-custom').value = items.aiModelCustom || '';
+        } else {
+            modelChoiceSelect.value = 'custom';
+            document.getElementById('ai-model-custom').value = items.aiModel || items.aiModelCustom || '';
+        }
+        toggleCustomModelInput();
+
         if (!items.isSetupComplete) {
             const contributorCheckbox = document.getElementById('contributer');
             // Check if we already added the warning to avoid duplicates on re-render if that happens
@@ -204,6 +248,14 @@ document.getElementById('votepercentage').addEventListener('input', function() {
 });
 document.getElementById('contributer').addEventListener('change', setNotSavedStatus);
 document.getElementById('auto-complete').addEventListener('change', setNotSavedStatus);
+document.getElementById('ai-fallback-enabled').addEventListener('change', setNotSavedStatus);
+document.getElementById('ai-ask-before-fallback').addEventListener('change', setNotSavedStatus);
+document.getElementById('openrouter-api-key').addEventListener('input', setNotSavedStatus);
+document.getElementById('ai-model-choice').addEventListener('change', function() {
+    toggleCustomModelInput();
+    setNotSavedStatus();
+});
+document.getElementById('ai-model-custom').addEventListener('input', setNotSavedStatus);
 
 
 document.getElementById('minvotes').addEventListener('change', function() {

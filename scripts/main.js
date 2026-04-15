@@ -1,8 +1,8 @@
 /* global chrome */
 import { taskStatus } from './task_statuses.js';
-import { getUserID, hasAnswers, isThereTask, getTaskUniqueID, updateSelectedAnswers, getTask } from '../task_logic/read_from_task.js';
+import { getUserID, hasAnswers, isThereTask, getTaskUniqueID, updateSelectedAnswers, getTask, getTaskDDfieldID } from '../task_logic/read_from_task.js';
 import { writeAnswers} from '../task_logic/write_to_task.js';
-import { autoNext, _DEBUG } from './constants.js';
+import { autoNext, _DEBUG, taskFieldSelectors } from './constants.js';
 import { blockUserInteraction, unblockUserInteraction, debugLog, fetchMinSettings, toggleTaskStatusesVisibility, isUIHidden, getInstallationKey} from './utils.js';
 import { defaultOptions } from './constants.js';
 
@@ -15,6 +15,18 @@ function fetchTask(url, options) {
             json: async () => null,
             text: async () => null
         };
+    });
+}
+
+function sendRuntimeMessage(message) {
+    return new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage(message, (response) => {
+            if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+                return;
+            }
+            resolve(response);
+        });
     });
 }
 
@@ -98,6 +110,23 @@ async function syncTaskWithDB(task) {
 }
 
 let settings = {};
+const AI_FALLBACK_TIMEOUT_MS = 45000;
+const AI_MAX_ATTEMPTS_PER_TASK = 2;
+const aiFallbackAttempts = new Map();
+const aiFallbackInProgress = new Set();
+
+function resolveConfiguredModel(items) {
+    const modelChoice = items.aiModelChoice || '';
+    const customModel = (items.aiModelCustom || '').trim();
+    const directModel = (items.aiModel || '').trim();
+
+    if (modelChoice === 'custom') {
+        return customModel || directModel || defaultOptions.aiModel;
+    }
+
+    return modelChoice || directModel || defaultOptions.aiModel;
+}
+
 function loadSettings() {
     return new Promise((resolve) => {
         chrome.storage.sync.get(defaultOptions, function(items) {
@@ -110,9 +139,394 @@ function loadSettings() {
             settings.apiMinvotes = items.apiMinvotes || 0;
             settings.apiVotepercentage = items.apiVotepercentage || 0.0;
             settings.autoComplete = items.autoComplete;
+            settings.aiFallbackEnabled = !!items.aiFallbackEnabled;
+            settings.aiAskBeforeFallback = !!items.aiAskBeforeFallback;
+            settings.openRouterApiKey = items.openRouterApiKey || items.geminiApiKey || '';
+            settings.aiModelChoice = items.aiModelChoice || defaultOptions.aiModelChoice;
+            settings.aiModelCustom = items.aiModelCustom || '';
+            settings.aiModel = resolveConfiguredModel(items);
             resolve(items);
         });
     });
+}
+
+function extractJsonObject(text) {
+    if (!text || typeof text !== 'string') return null;
+
+    const trimmed = text.trim();
+    try {
+        return JSON.parse(trimmed);
+    } catch {
+        // Continue to best-effort extraction.
+    }
+
+    const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (fenceMatch && fenceMatch[1]) {
+        try {
+            return JSON.parse(fenceMatch[1].trim());
+        } catch {
+            // Continue to object range parsing.
+        }
+    }
+
+    const firstBrace = trimmed.indexOf('{');
+    const lastBrace = trimmed.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+        const maybeJson = trimmed.slice(firstBrace, lastBrace + 1);
+        try {
+            return JSON.parse(maybeJson);
+        } catch {
+            return null;
+        }
+    }
+
+    return null;
+}
+
+function normalizeLooseText(value) {
+    return String(value || '')
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+async function getDropdownOptionsForAI(dropdownElement) {
+    try {
+        dropdownElement.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        await new Promise(resolve => setTimeout(resolve, 60));
+
+        const options = Array.from(document.querySelectorAll('div.ng-option'))
+            .map(optionEl => (optionEl.textContent || '').trim())
+            .filter(Boolean);
+
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        return Array.from(new Set(options));
+    } catch (error) {
+        debugLog('Dropdown options read failed:', error);
+        return [];
+    }
+}
+
+async function collectTaskForAI(task) {
+    const fullTaskField = document.querySelector(taskFieldSelectors.fullTask);
+    const taskText = (fullTaskField?.innerText || fullTaskField?.textContent || '').trim();
+
+    const fields = [];
+    for (let index = 0; index < task.answerFields.length; index++) {
+        const field = task.answerFields[index];
+        const fieldData = {
+            index,
+            type: field.type,
+            id: field.id || '',
+            text: (field.element?.innerText || field.element?.textContent || '').trim()
+        };
+
+        if (field.type === 'dropdown') {
+            fieldData.options = await getDropdownOptionsForAI(field.element);
+        }
+
+        fields.push(fieldData);
+    }
+
+    const dragOptions = [];
+    const dragElements = Array.from(document.querySelectorAll(taskFieldSelectors.dragDrop.drag));
+    for (const dragElement of dragElements) {
+        const text = (dragElement.innerText || dragElement.textContent || '').trim();
+        const id = await getTaskDDfieldID(dragElement, 'drag');
+        dragOptions.push({ id, text });
+    }
+
+    return {
+        taskId: task.uniqueID,
+        taskText,
+        fieldCount: task.answerFields.length,
+        fields,
+        dragOptions
+    };
+}
+
+async function fetchGeminiSuggestion(task) {
+    const model = settings.aiModel || defaultOptions.aiModel;
+    const taskPayload = await collectTaskForAI(task);
+
+    const prompt = [
+        'A következő magyar kompetenciafeladatot kell megoldanod.',
+        'Csak JSON-t adj vissza, kódtömb nélkül.',
+        'Pontos forma:',
+        '{"answers":[{"index":0,"value":false,"method":"...","reason":"...","confidence":0.0}],"overallConfidence":0.0,"summary":"..."}',
+        'A answers tömb hossza pontosan egyezzen meg a fieldCount értékével, és minden index szerepeljen.',
+        'A select mező value mezője kizárólag true vagy false lehet.',
+        'A dropdown/customNumber mező value mezője string vagy false legyen.',
+        'A dragDrop mező value mezője a kiválasztott elem ID-ja legyen (a dragOptions.id értékek közül), vagy false.',
+        'Dropdown esetén ha van options lista, lehetőleg abból pontos szöveget válassz.',
+        'Számolási feladatnál számolj pontosan, és ellenőrizd vissza az eredményt.',
+        'Ha nem vagy biztos a válaszban, akkor inkább adj false értéket.',
+        '',
+        JSON.stringify(taskPayload)
+    ].join('\n');
+
+    const response = await sendRuntimeMessage({
+        action: 'openrouter_generate',
+        apiKey: settings.openRouterApiKey,
+        model,
+        prompt
+    });
+
+    if (!response?.ok) {
+        throw new Error(`OpenRouter API hiba (${response?.status ?? 0}): ${response?.error || 'ismeretlen hiba'}`);
+    }
+
+    const data = response.data;
+    const rawContent = data?.choices?.[0]?.message?.content;
+    const text = typeof rawContent === 'string'
+        ? rawContent.trim()
+        : Array.isArray(rawContent)
+            ? rawContent.map(part => part?.text || '').join('\n').trim()
+            : '';
+
+    if (!text) {
+        throw new Error('A modell nem adott kiértékelhető választ');
+    }
+
+    const parsed = extractJsonObject(text);
+    if (!parsed || !Array.isArray(parsed.answers)) {
+        throw new Error('A modell válasza nem tartalmaz értelmezhető answers tömböt');
+    }
+
+    return parsed;
+}
+
+function extractAiAnswerValue(answerItem) {
+    if (answerItem === false || answerItem === null || typeof answerItem === 'undefined') {
+        return false;
+    }
+
+    if (typeof answerItem === 'object' && !Array.isArray(answerItem)) {
+        if (Object.prototype.hasOwnProperty.call(answerItem, 'value')) {
+            return answerItem.value;
+        }
+        if (Object.prototype.hasOwnProperty.call(answerItem, 'answer')) {
+            return answerItem.answer;
+        }
+    }
+
+    return answerItem;
+}
+
+async function resolveDragDropAnswerToId(rawValue) {
+    const raw = String(rawValue || '').trim();
+    if (!raw) {
+        return false;
+    }
+
+    const dragElements = Array.from(document.querySelectorAll(taskFieldSelectors.dragDrop.drag));
+    if (dragElements.length === 0) {
+        return raw;
+    }
+
+    const choices = [];
+    for (const dragElement of dragElements) {
+        const id = await getTaskDDfieldID(dragElement, 'drag');
+        const text = (dragElement.innerText || dragElement.textContent || '').trim();
+        choices.push({ id, text, normalizedText: normalizeLooseText(text) });
+    }
+
+    const byId = choices.find(choice => choice.id === raw);
+    if (byId) {
+        return byId.id;
+    }
+
+    if (/^\d+$/.test(raw)) {
+        const idx = parseInt(raw, 10) - 1;
+        if (idx >= 0 && idx < choices.length) {
+            return choices[idx].id;
+        }
+    }
+
+    const normalizedRaw = normalizeLooseText(raw);
+    const byExactText = choices.find(choice => choice.normalizedText === normalizedRaw);
+    if (byExactText) {
+        return byExactText.id;
+    }
+
+    const byPartialText = choices.find(choice => choice.normalizedText.includes(normalizedRaw) || normalizedRaw.includes(choice.normalizedText));
+    if (byPartialText) {
+        return byPartialText.id;
+    }
+
+    return raw;
+}
+
+async function normalizeGeminiAnswers(task, rawAnswers) {
+    if (!Array.isArray(rawAnswers) || rawAnswers.length !== task.answerFields.length) {
+        throw new Error('Az AI válasz tömb hossza eltér a mezők számától');
+    }
+
+    const normalizedAnswers = [];
+    for (let index = 0; index < rawAnswers.length; index++) {
+        const answerItem = rawAnswers[index];
+        const answer = extractAiAnswerValue(answerItem);
+        const fieldType = task.answerFields[index].type;
+
+        if (fieldType === 'select') {
+            if (answer === true) {
+                normalizedAnswers.push(true);
+                continue;
+            }
+            if (typeof answer === 'string') {
+                const normalized = normalizeLooseText(answer);
+                normalizedAnswers.push(normalized === 'true' || normalized === '1' || normalized === 'igen');
+                continue;
+            }
+            normalizedAnswers.push(false);
+            continue;
+        }
+
+        if (answer === false || answer === null || typeof answer === 'undefined') {
+            normalizedAnswers.push(false);
+            continue;
+        }
+
+        if (fieldType === 'dragDrop') {
+            const dragId = await resolveDragDropAnswerToId(answer);
+            normalizedAnswers.push(dragId);
+            continue;
+        }
+
+        if (fieldType === 'dropdown') {
+            const raw = String(answer).trim();
+            if (!raw) {
+                normalizedAnswers.push(false);
+                continue;
+            }
+
+            const target = task.answerFields[index].element;
+            const available = Array.from(target.querySelectorAll('span.ng-value-label, div.ng-placeholder'))
+                .map(el => (el.textContent || '').trim())
+                .filter(Boolean);
+
+            if (available.length === 0) {
+                normalizedAnswers.push(raw);
+                continue;
+            }
+
+            const normalizedRaw = normalizeLooseText(raw);
+            const exact = available.find(option => normalizeLooseText(option) === normalizedRaw);
+            if (exact) {
+                normalizedAnswers.push(exact);
+                continue;
+            }
+
+            const partial = available.find(option => {
+                const normalizedOption = normalizeLooseText(option);
+                return normalizedOption.includes(normalizedRaw) || normalizedRaw.includes(normalizedOption);
+            });
+            normalizedAnswers.push(partial || raw);
+            continue;
+        }
+
+        const normalized = String(answer).trim();
+        normalizedAnswers.push(normalized === '' ? false : normalized);
+    }
+
+    return normalizedAnswers;
+}
+
+async function tryAiFallbackFill(task, taskFillStatus, reasonText, autoNextEnabled) {
+    if (!settings.aiFallbackEnabled) {
+        return null;
+    }
+
+    const taskKey = task?.uniqueID || `task-${Date.now()}`;
+
+    if (aiFallbackInProgress.has(taskKey)) {
+        taskFillStatus.fail({ text: 'AI kitöltés már fut ehhez a feladathoz', status: 'skipped' });
+        return false;
+    }
+
+    const attemptCount = aiFallbackAttempts.get(taskKey) || 0;
+    if (attemptCount >= AI_MAX_ATTEMPTS_PER_TASK) {
+        taskFillStatus.fail({ text: 'AI kitöltés max próbálkozás elérve ennél a feladatnál', status: 'skipped' });
+        return false;
+    }
+
+    if (!settings.openRouterApiKey) {
+        taskFillStatus.fail({ text: 'nincs szerveres megoldás, és nincs beállított OpenRouter token', status: 'skipped' });
+        return false;
+    }
+
+    if (settings.aiAskBeforeFallback) {
+        const userAccepted = window.confirm(`Nincs biztos szerveres megoldás (${reasonText}).\nPróbáljam AI-val kitölteni?`);
+        if (!userAccepted) {
+            taskFillStatus.fail({ text: 'AI kitöltés kihagyva (felhasználói döntés)', status: 'skipped' });
+            return false;
+        }
+    }
+
+    aiFallbackAttempts.set(taskKey, attemptCount + 1);
+    aiFallbackInProgress.add(taskKey);
+
+    try {
+        const runAiFlow = async () => {
+            taskFillStatus.set_text(`AI kitöltés (${settings.aiModel || defaultOptions.aiModel}) ...`);
+
+            let geminiAnswer;
+            try {
+                geminiAnswer = await fetchGeminiSuggestion(task);
+            } catch (error) {
+                taskFillStatus.error({ text: `AI hívás sikertelen: ${getErrorMessage(error)}` });
+                return false;
+            }
+
+            let normalizedAnswers;
+            try {
+                normalizedAnswers = await normalizeGeminiAnswers(task, geminiAnswer.answers);
+            } catch (error) {
+                taskFillStatus.error({ text: `AI válasz formátumhiba: ${getErrorMessage(error)}` });
+                return false;
+            }
+
+            if (geminiAnswer.summary || geminiAnswer.reason) {
+                debugLog('AI summary:', geminiAnswer.summary || geminiAnswer.reason);
+            }
+            if (Array.isArray(geminiAnswer.answers)) {
+                debugLog('AI detailed answers:', geminiAnswer.answers);
+            }
+
+            taskFillStatus.set_text('AI válasz beírása...');
+            try {
+                await writeAnswersWithRetry(task, normalizedAnswers, 4);
+                taskFillStatus.succeed({ text: 'AI válasz beírása kész' });
+            } catch (error) {
+                taskFillStatus.error({ text: `AI kitöltés sikertelen: ${getErrorMessage(error)}` });
+                return false;
+            }
+
+            if (autoNextEnabled) {
+                try {
+                    await goToNextTask();
+                } catch (error) {
+                    debugLog('Auto-next failed after AI fill:', error);
+                }
+            }
+
+            aiFallbackAttempts.delete(taskKey);
+            return true;
+        };
+
+        const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error(`AI timeout (${Math.floor(AI_FALLBACK_TIMEOUT_MS / 1000)}s)`)), AI_FALLBACK_TIMEOUT_MS);
+        });
+
+        return await Promise.race([runAiFlow(), timeoutPromise]);
+    } catch (error) {
+        taskFillStatus.error({ text: `AI kitöltés leállítva: ${getErrorMessage(error)}` });
+        return false;
+    } finally {
+        aiFallbackInProgress.delete(taskKey);
+    }
 }
 
 /**
@@ -456,6 +870,45 @@ function getErrorMessage(error) {
 }
 
 async function writeAnswersWithRetry(task, answers, maxAttempts = 2) {
+    const normalizeForCompare = (value) => String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const expectedMatchesField = (field, expected) => {
+        if (!expected) {
+            return true;
+        }
+
+        if (field.type === 'select') {
+            return expected === true ? field.value === true : true;
+        }
+
+        if (field.type === 'dragDrop') {
+            return String(field.value || '').trim() === String(expected).trim();
+        }
+
+        if (field.type === 'dropdown') {
+            const actual = normalizeForCompare(field.value);
+            const wanted = normalizeForCompare(expected);
+            return actual === wanted || actual.includes(wanted) || wanted.includes(actual);
+        }
+
+        if (field.type === 'customNumber') {
+            const actual = normalizeForCompare(field.value);
+            const wanted = normalizeForCompare(expected);
+            return actual === wanted;
+        }
+
+        return normalizeForCompare(field.value) === normalizeForCompare(expected);
+    };
+
+    const getPendingIndexes = () => {
+        const pending = [];
+        for (let idx = 0; idx < task.answerFields.length; idx++) {
+            if (!expectedMatchesField(task.answerFields[idx], answers[idx])) {
+                pending.push(idx);
+            }
+        }
+        return pending;
+    };
+
     let lastError = null;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -463,16 +916,13 @@ async function writeAnswersWithRetry(task, answers, maxAttempts = 2) {
             await writeAnswers(task, task.answerFields, answers);
             await updateSelectedAnswers(task);
 
-            const hasPendingRequiredAnswers = task.answerFields.some((field, idx) => {
-                const expected = answers[idx];
-                return expected && !field.value;
-            });
+            const pendingIndexes = getPendingIndexes();
 
-            if (!hasPendingRequiredAnswers) {
+            if (pendingIndexes.length === 0) {
                 return;
             }
 
-            lastError = new Error('a válaszok egy része nem íródott be');
+            lastError = new Error(`függő mezők maradtak: ${pendingIndexes.map(i => i + 1).join(', ')}`);
         } catch (error) {
             lastError = error;
         }
@@ -499,8 +949,11 @@ async function tryAutoFillTask(task, taskFillStatus, autoNext) {
     }
 
     if (!queryResult) {
-        taskFillStatus.fail({ text: 'nincs elegendő megbízható válasz ehhez a feladathoz', status: 'skipped' });
-        debugLog('No solution found in the database.');
+        debugLog('No solution found in the database. Trying AI fallback if enabled.');
+        const aiFilled = await tryAiFallbackFill(task, taskFillStatus, 'nincs elegendő megbízható válasz', autoNext);
+        if (aiFilled === null) {
+            taskFillStatus.fail({ text: 'nincs elegendő megbízható válasz ehhez a feladathoz', status: 'skipped' });
+        }
         return;
     }
 
@@ -515,10 +968,13 @@ async function tryAutoFillTask(task, taskFillStatus, autoNext) {
     }
 
     if (!queryResult.totalVotes || queryResult.totalVotes < settings.minvotes || 100 * queryResult.votes / queryResult.totalVotes < settings.votepercentage) {
-        taskFillStatus.fail({ text: 'nincs elegendő leadott vagy egyező válasz ehhez a feladathoz', status: 'skipped' });
         debugLog('Not enough votes or not enough percentage of votes.');
         debugLog('Total votes:', queryResult.totalVotes, 'required votes:', settings.minvotes);
         debugLog('Vote%:', 100 * queryResult.votes / queryResult.totalVotes, 'required vote%:', settings.votepercentage);
+        const aiFilled = await tryAiFallbackFill(task, taskFillStatus, 'nincs elegendő leadott vagy egyező válasz', autoNext);
+        if (aiFilled === null) {
+            taskFillStatus.fail({ text: 'nincs elegendő leadott vagy egyező válasz ehhez a feladathoz', status: 'skipped' });
+        }
         return;
     }
 

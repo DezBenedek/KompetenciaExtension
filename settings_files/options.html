@@ -74,6 +74,35 @@
             <input type="checkbox" id="auto-complete" name="auto-complete" style="width: auto;"></label>
         </div>
     </div>
+
+    <div class="option-group">
+        <h3>AI kitöltés (Gemini)</h3>
+        <label for="openrouter-api-key">OpenRouter API token:</label>
+        <input type="password" id="openrouter-api-key" name="openrouter-api-key" placeholder="sk-or-v1-...">
+
+        <label for="ai-model-choice">AI modell:</label>
+        <select id="ai-model-choice" name="ai-model-choice">
+            <option value="google/gemini-3-flash-preview">google/gemini-3-flash-preview</option>
+            <option value="google/gemini-2.5-flash">google/gemini-2.5-flash</option>
+            <option value="google/gemini-2.5-pro">google/gemini-2.5-pro</option>
+            <option value="openai/gpt-4o-mini">openai/gpt-4o-mini</option>
+            <option value="anthropic/claude-3.5-sonnet">anthropic/claude-3.5-sonnet</option>
+            <option value="custom">Egyedi modell...</option>
+        </select>
+
+        <label for="ai-model-custom">Egyedi modell azonosító:</label>
+        <input type="text" id="ai-model-custom" name="ai-model-custom" placeholder="pl. meta-llama/llama-3.1-70b-instruct">
+
+        <div>
+            <label style="display:inline-block" title="Ha nincs szerveres megoldás, AI alapú kitöltés próbálása.">AI fallback használata:
+            <input type="checkbox" id="ai-fallback-enabled" name="ai-fallback-enabled" style="width: auto;"></label>
+        </div>
+        <div>
+            <label style="display:inline-block" title="Mielőtt AI kitöltést indít, kérjen megerősítést.">Rákérdezés AI kitöltés előtt:
+            <input type="checkbox" id="ai-ask-before-fallback" name="ai-ask-before-fallback" style="width: auto;"></label>
+        </div>
+        <small style="color:#666;display:block;margin-top:8px;">Szolgáltató: OpenRouter</small>
+    </div>
     
     <button id="save">Mentés</button>
     <button id="advancedbutton">fejlesztői beállítások megjelenítése</button>

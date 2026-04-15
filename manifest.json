@@ -31,7 +31,9 @@
     "storage"
   ],
   "host_permissions": [
-    "https://tekaku.hu/*"
+    "https://tekaku.hu/*",
+    "https://openrouter.ai/*",
+    "https://*.openrouter.ai/*"
   ],
   "options_ui": {
     "page": "settings_files/options.html",
