@@ -3,27 +3,15 @@ import { taskFieldSelectors } from '../scripts/constants.js';
 
 export { answerField, task, isThereTask, getTaskUniqueID, getTaskDDfieldID,getUserID, updateSelectedAnswers, getTask, hasAnswers }
 
-/**
- * object that holds information about an answer field
- * @property {string} type - The type of the answer field (e.g., 'select', 'dropdown', 'customNumber', 'dragDrop')
- * @property {HTMLElement} element - The HTML element representing the answer field
- * @property {string | boolean} value - The current value of the answer field, false if not answered, string for the answer, true for multi-choice selected
- * @property {string} id - An optional identifier for the element in the field, used in dragDrop tasks
- */
 class answerField {
     constructor(type, element, value, id='') {
         this.type = type;
         this.element = element;
         this.value = value;
-        this.id = id; // only used in dragDrop
+        this.id = id;
     }
 }
 
-/**
- * object that holds information about a task
- * @property {string} uniqueID - The unique identifier for the task
- * @property {Array<answerField>} answerFields - The answer fields associated with the task
- */
 class task {
     constructor(uniqueID, answerFields) {
         this.uniqueID = uniqueID;
@@ -60,13 +48,18 @@ async function hashTaskImages(fullTaskField) {
 }
 
 async function getTaskUniqueID() {
-    const fullTaskField = document.querySelector(taskFieldSelectors.fullTask);
-    if (!fullTaskField) {
+    const fullTaskFields = Array.from(document.querySelectorAll(taskFieldSelectors.fullTask));
+    if (fullTaskFields.length === 0) {
         return null;
     }
 
-    const allText = fullTaskField.textContent.trim();
-    const imageIds = await hashTaskImages(fullTaskField);
+    let allText = '';
+    let imageIds = '';
+
+    for (const fullTaskField of fullTaskFields) {
+        allText += (fullTaskField.textContent || '').trim();
+        imageIds += await hashTaskImages(fullTaskField);
+    }
 
     return hashSHA256(allText + imageIds);
 
@@ -79,7 +72,7 @@ function getAnswerFields(selector, type, idGenerator = null) {
 
 async function getUserID() {
     const url = window.location.href;
-    const match = url.match(/[?&]azon=([^&%]+)/); // regex matches 'azon' parameter until a % character, expecting azon=A111-B222%2F...
+    const match = url.match(/[?&]azon=([^&%]+)/);
     if (match && match[1]) {
         return await hashSHA256(decodeURIComponent(match[1]));
     }
@@ -114,9 +107,9 @@ async function getDragFieldID(div) {
 }
 
 function isMultiChoiceAnswerSelected(MultiChoiceDiv) {
-    if (MultiChoiceDiv.classList.contains('selected') || //for selectText
-        MultiChoiceDiv.querySelector('div.selected') ||  //for categorySelect
-        MultiChoiceDiv.querySelector('div.kep-valasz-check-selected') //for selectImage
+    if (MultiChoiceDiv.classList.contains('selected') ||
+        MultiChoiceDiv.querySelector('div.selected') ||
+        MultiChoiceDiv.querySelector('div.kep-valasz-check-selected')
     ) {
         return true;
     }
@@ -124,12 +117,11 @@ function isMultiChoiceAnswerSelected(MultiChoiceDiv) {
 }
 
 function dropdownAnswerSelected(dropdownDiv) {
-    let dropdownText = dropdownDiv.firstChild.textContent; // .firstChild because of the stupid 'x' at the end sometimes
+    let dropdownText = dropdownDiv.firstChild.textContent;
     if (dropdownText == "") {
         return false;
     }
     dropdownText = dropdownText.trim();
-    // some tasks have placeholder text
     if (dropdownDiv.querySelector('div.ng-placeholder')) {
         const placeholder = dropdownDiv.querySelector('div.ng-placeholder').textContent.trim();
         if (dropdownText == placeholder) {
@@ -188,7 +180,7 @@ async function getTask() {
         ...await getAnswerFields(taskFieldSelectors.dragDrop.drop, 'dragDrop', async (div) => await getTaskDDfieldID(div, 'drop'))
     );
 
-    answers = dedupeByKey(answers, 'element'); // de-dupe fields to avoid double entries of text and image selects
+    answers = dedupeByKey(answers, 'element');
 
     let t = new task(uniqueID,answers);
     debugLog('Detected task:', t);

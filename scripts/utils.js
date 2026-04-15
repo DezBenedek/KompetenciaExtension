@@ -1,28 +1,20 @@
-/* global chrome */
 import { maxImageHashSize, taskFieldSelectors, _DEBUG } from './constants.js';   
-//utility funcs NOT requiring DOM access:
 export { debugLog, dedupeByKey, hashSHA256, waitForImageLoad, waitForLoadingScreen, fetchMinSettings, isUIHidden, getInstallationKey}
 
 const debugLog = _DEBUG ? console.log.bind(console) : function(){};
 
-// Global state for UI visibility
 let __uiHidden = false;
 
 function isUIHidden() {
     return __uiHidden;
 }
 
-/**
- * Get the unique installation key for this extension installation
- * @returns {Promise<string>} The installation key, or a generated fallback if not found
- */
 function getInstallationKey() {
     return new Promise((resolve) => {
         chrome.storage.sync.get({ installationKey: null }, (items) => {
             if (items.installationKey) {
                 resolve(items.installationKey);
             } else {
-                // Fallback: generate a new key if not found
                 const fallbackKey = `install-fb_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 15)}`;
                 chrome.storage.sync.set({ installationKey: fallbackKey });
                 resolve(fallbackKey);
@@ -52,14 +44,13 @@ async function hashSHA256(text) {
 function waitForImageLoad(img) {
     return new Promise(resolve => {
         if (img.complete) {
-            resolve(); // already loaded
+            resolve();
         } else {
             img.onload = img.onerror = () => resolve();
         }
     });
 }
 
-//utility funcs which DO require DOM access:
 
 export { hashImageToID, getCurrentScale, blockUserInteraction, unblockUserInteraction, zoomOut, zoomIn }
 async function hashImageToID(img) {
@@ -90,17 +81,15 @@ function getCurrentScale() {
                 return (percent / 100);
             }
         }
-        return 1; // Default scale if no zoom is applied
+        return 1;
     } catch (e) {
         return 1;
     }
 }
 
-/**used to prevent accidental tampering with in-progress auto-fill */
 function blockUserInteraction() {
     if (document.getElementById('__input-blocker')) return;
 
-    // scroll to top to help ensure elements stay in place while we interact
     try { window.scrollTo(0, 0); } catch (e) {debugLog('scrollTo failed in blockUserInteraction, not necessarily fatal', e); }
     const blocker = document.createElement('div');
     blocker.id = '__input-blocker';
@@ -111,7 +100,6 @@ function blockUserInteraction() {
         zIndex: '2147483646',
         cursor: 'wait'
     });
-    // make sure clicks are blocked but don't capture pointer events for debugging overlays
     blocker.style.pointerEvents = 'auto';
     document.body.appendChild(blocker);
 }
@@ -125,8 +113,7 @@ function zoomOut(zoomPercent = 25) {
     let oldZoom = document.body.style.zoom;
     document.body.style.zoom = `${zoomPercent}%`;
     let tkelo = document.querySelector("tk-elonezet");
-    if (tkelo) tkelo.style.height = "3000px"; // for some reason the page doesnt extend automatically, so this is a workaround
-    // scale status indicator to compensate for page zoom so it stays readable
+    if (tkelo) tkelo.style.height = "3000px";
     try {
         scaleTaskStatuses(1 / (zoomPercent / 100));
     } catch (e) {
@@ -138,8 +125,7 @@ function zoomOut(zoomPercent = 25) {
 function zoomIn(oldZoom) {
     document.body.style.zoom = oldZoom;
     let tkelo = document.querySelector("tk-elonezet");
-    if (tkelo) tkelo.style.height = "100%"; // reset height to default
-    // reset status indicator scale
+    if (tkelo) tkelo.style.height = "100%";
     try { scaleTaskStatuses(1); } catch (e) { debugLog('scaleTaskStatuses failed on zoomIn', e); }
 }
 
@@ -150,7 +136,6 @@ async function waitForLoadingScreen() {
     return;
 }
 
-//taskStatuses utils
 
 export { repositionTaskStatuses, scaleTaskStatuses, toggleTaskStatusesVisibility }
 
@@ -166,7 +151,6 @@ function repositionTaskStatuses(scale = -1) {
             }
             else {
                 const prevTop = tasks[index - 1].getBoundingClientRect().top;
-                // Position current element 10px above the previous element's top
                 task.style.bottom = (window.innerHeight - prevTop + 8) * scale + 'px';
             }
         });
@@ -181,29 +165,21 @@ function scaleTaskStatuses(scale) {
             status.style.transformOrigin = 'bottom right';
             status.style.transform = `scale(${scale})`;
         });
-        // Also reposition with scaled spacing
         repositionTaskStatuses(scale);
     } catch (e) {
         debugLog('scaleTaskStatuses error', e);
     }
 }
 
-/**
- * Toggle visibility of task statuses and all custom buttons
- * Uses display:none to hide, not delete
- */
 function toggleTaskStatusesVisibility() {
     try {
-        // Toggle the global state
         __uiHidden = !__uiHidden;
         
-        // Toggle task statuses
         const taskStatuses = document.querySelectorAll('[id^="__tk_task_"]');
         taskStatuses.forEach((status) => {
             status.style.display = __uiHidden ? 'none' : '';
         });
         
-        // Toggle all custom buttons created with addCustomButton (data-tekaku-btn attribute)
         const customBtns = document.querySelectorAll('[data-tekaku-btn="true"]');
         customBtns.forEach((btn) => {
             btn.style.display = __uiHidden ? 'none' : '';
@@ -215,30 +191,48 @@ function toggleTaskStatusesVisibility() {
     }
 }
 
-/**
- * Fetch minimum settings from the API
- * @param {string} url - The base server URL (should include trailing slash)
- * @returns {Promise<{minvotes: number, votepercentage: number}|null>} The min settings or null if fetch fails
- */
 async function fetchMinSettings(url) {
     try {
-        const minSettingsUrl = url + 'minsettings';
-        const response = await fetch(minSettingsUrl, {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/json'
-            }
-        });
+        const baseUrl = String(url || '').trim().replace(/\/+$/, '');
+        if (!baseUrl) {
+            debugLog('Cannot fetch min settings: empty base URL');
+            return null;
+        }
+
+        const minSettingsUrl = `${baseUrl}/minsettings`;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+        let response;
+        try {
+            response = await fetch(minSettingsUrl, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                signal: controller.signal
+            });
+        } finally {
+            clearTimeout(timeoutId);
+        }
         
         if (response.ok) {
-            const data = await response.json();
+            const data = await response.json().catch(() => null);
+            if (!data || (typeof data !== 'object')) {
+                debugLog('Min settings response is not valid JSON object');
+                return null;
+            }
+
+            const minvotes = Number.parseInt(data.minvotes, 10);
+            const votepercentage = Number.parseFloat(data.votepercentage);
+
             debugLog('Min settings fetched successfully:', data);
             return {
-                minvotes: parseInt(data.minvotes),
-                votepercentage: parseFloat(data.votepercentage)
+                minvotes: Number.isFinite(minvotes) ? minvotes : 0,
+                votepercentage: Number.isFinite(votepercentage) ? votepercentage : 0
             };
         } else {
-            debugLog('Failed to fetch min settings:', response.status);
+            debugLog('Failed to fetch min settings:', response.status, response.statusText);
             return null;
         }
     } catch (error) {

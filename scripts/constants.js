@@ -34,6 +34,7 @@ export const defaultOptions = {
     minvotes: 5,
     votepercentage: 0.8,
     contributer: false, 
+    riskOverrideVotepercentage: false,
     url: 'https://tekaku.hu/',
     autoComplete: true,
     aiFallbackEnabled: true,
@@ -49,16 +50,8 @@ export const defaultOptions = {
     apiVotepercentage: 0.0
 };
 
-/** 
- * The maximum size (in pixels) to which images are resized before hashing.
- * @type {number}
- */
 export const maxImageHashSize = 20;
     
-/** 
- * Whether to automatically proceed to the next task after answering.
- * @type {boolean}
- */
 export const autoNext = false;
 
 export const _DEBUG = false;

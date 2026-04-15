@@ -1,4 +1,3 @@
-/* global chrome */
 import { taskStatus } from './task_statuses.js';
 import { getUserID, hasAnswers, isThereTask, getTaskUniqueID, updateSelectedAnswers, getTask, getTaskDDfieldID } from '../task_logic/read_from_task.js';
 import { writeAnswers} from '../task_logic/write_to_task.js';
@@ -36,7 +35,6 @@ async function fetchTaskSolution(task) {
         fieldCount: task.answerFields.length
     };
     
-    // Get the unique installation key instead of URL parameter
     const installationKey = await getInstallationKey();
     
     let user = {
@@ -45,7 +43,6 @@ async function fetchTaskSolution(task) {
     };
     
     try {
-        //debugLog('Fetching solution for task:', task, 'and user:', user);
         const reply = await sendRequestToWebSocket({
             type: 'getSolution',
             task: taskData,
@@ -56,7 +53,6 @@ async function fetchTaskSolution(task) {
             debugLog('task sent:', reply);
             return;
         }
-        //debugLog('Solution fetched successfully', reply);
         return reply.solution;
     }
     catch (error) {
@@ -71,7 +67,6 @@ async function sendTaskSolution(task) {
         solution: task.answerFields.map(field => field.value)
     };
     
-    // Get the unique installation key instead of URL parameter
     const installationKey = await getInstallationKey();
     
     const user = {
@@ -84,7 +79,6 @@ async function sendTaskSolution(task) {
             task: taskData,
             user: user
         });
-        //debugLog('Posting solution to DB:', task, 'for user:', user);
         if (reply && reply.status === "ok") {
             debugLog('Solution posted successfully', reply);
             return reply;
@@ -134,6 +128,7 @@ function loadSettings() {
             settings.minvotes = items.minvotes;
             settings.votepercentage = items.votepercentage * 100.0;
             settings.isContributor = items.contributer;
+            settings.riskOverrideVotepercentage = !!items.riskOverrideVotepercentage;
             settings.url = items.url;
             settings.isSetupComplete = items.isSetupComplete;
             settings.apiMinvotes = items.apiMinvotes || 0;
@@ -157,7 +152,6 @@ function extractJsonObject(text) {
     try {
         return JSON.parse(trimmed);
     } catch {
-        // Continue to best-effort extraction.
     }
 
     const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
@@ -165,7 +159,6 @@ function extractJsonObject(text) {
         try {
             return JSON.parse(fenceMatch[1].trim());
         } catch {
-            // Continue to object range parsing.
         }
     }
 
@@ -210,10 +203,21 @@ async function getDropdownOptionsForAI(dropdownElement) {
 }
 
 async function collectTaskForAI(task) {
-    const fullTaskField = document.querySelector(taskFieldSelectors.fullTask);
-    const taskText = (fullTaskField?.innerText || fullTaskField?.textContent || '').trim();
+    const fullTaskFields = Array.from(document.querySelectorAll(taskFieldSelectors.fullTask));
+    const taskBlocks = fullTaskFields
+        .map((field, idx) => {
+            const text = (field?.innerText || field?.textContent || '').trim();
+            return {
+                order: idx,
+                text
+            };
+        })
+        .filter(block => block.text !== '');
+
+    const taskText = taskBlocks.map(block => `[Feladat ${block.order + 1}] ${block.text}`).join('\n\n');
 
     const fields = [];
+    const dragTargets = [];
     for (let index = 0; index < task.answerFields.length; index++) {
         const field = task.answerFields[index];
         const fieldData = {
@@ -225,6 +229,14 @@ async function collectTaskForAI(task) {
 
         if (field.type === 'dropdown') {
             fieldData.options = await getDropdownOptionsForAI(field.element);
+        }
+
+        if (field.type === 'dragDrop') {
+            dragTargets.push({
+                index,
+                id: field.id || '',
+                text: fieldData.text
+            });
         }
 
         fields.push(fieldData);
@@ -241,9 +253,11 @@ async function collectTaskForAI(task) {
     return {
         taskId: task.uniqueID,
         taskText,
+        taskBlocks,
         fieldCount: task.answerFields.length,
         fields,
-        dragOptions
+        dragOptions,
+        dragTargets
     };
 }
 
@@ -252,15 +266,19 @@ async function fetchGeminiSuggestion(task) {
     const taskPayload = await collectTaskForAI(task);
 
     const prompt = [
-        'A következő magyar kompetenciafeladatot kell megoldanod.',
+        'A következő magyar kompetencia feladatsort kell megoldanod.',
         'Csak JSON-t adj vissza, kódtömb nélkül.',
         'Pontos forma:',
         '{"answers":[{"index":0,"value":false,"method":"...","reason":"...","confidence":0.0}],"overallConfidence":0.0,"summary":"..."}',
-        'A answers tömb hossza pontosan egyezzen meg a fieldCount értékével, és minden index szerepeljen.',
+        'A answers tömbben minden index pontosan egyszer szerepeljen 0..fieldCount-1 között (sorrend mindegy).',
+        'FONTOS: nem kötelező minden opciót vagy elemet felhasználni. Ami bizonytalan vagy nem kell, legyen false.',
+        'FONTOS: lehet több külön feladat ugyanazon az oldalon, akár vegyes típusokkal. A teljes oldalt kezeld egységesen.',
         'A select mező value mezője kizárólag true vagy false lehet.',
-        'A dropdown/customNumber mező value mezője string vagy false legyen.',
-        'A dragDrop mező value mezője a kiválasztott elem ID-ja legyen (a dragOptions.id értékek közül), vagy false.',
-        'Dropdown esetén ha van options lista, lehetőleg abból pontos szöveget válassz.',
+        'A dropdown mező value mezője legyen pontosan egy opciószöveg a fields[index].options listából, vagy false.',
+        'A customNumber mező value mezője legyen számot tartalmazó string (pl. "12" vagy "3.5"), vagy false.',
+        'A dragDrop mező value mezője elsődlegesen dragOptions.id legyen. Ha nem biztos, adhatsz drag szöveget is, vagy false.',
+        'A dragTargets lista mutatja a célhelyeket (drop zónák) index szerint; csak oda rendelj elemet, ahol valóban kell. A többi legyen false.',
+        'Ugyanazt a drag elemet ne rendeld több különböző célhoz, kivéve ha a feladat kifejezetten ezt kéri.',
         'Számolási feladatnál számolj pontosan, és ellenőrizd vissza az eredményt.',
         'Ha nem vagy biztos a válaszban, akkor inkább adj false értéket.',
         '',
@@ -315,15 +333,81 @@ function extractAiAnswerValue(answerItem) {
     return answerItem;
 }
 
+function isAiNegativeValue(value) {
+    if (value === false || value === null || typeof value === 'undefined') {
+        return true;
+    }
+
+    if (typeof value === 'string') {
+        const normalized = normalizeLooseText(value);
+        return normalized === '' || normalized === 'false' || normalized === 'none' || normalized === 'n/a' || normalized === 'nem tudom' || normalized === 'ismeretlen';
+    }
+
+    return false;
+}
+
+function toIndexedRawAnswers(rawAnswers, fieldCount) {
+    const indexed = Array(fieldCount).fill(false);
+
+    if (!rawAnswers) {
+        return indexed;
+    }
+
+    if (Array.isArray(rawAnswers)) {
+        for (let i = 0; i < rawAnswers.length; i++) {
+            const item = rawAnswers[i];
+            let targetIndex = i;
+            if (item && typeof item === 'object' && Object.prototype.hasOwnProperty.call(item, 'index')) {
+                const parsedIndex = Number.parseInt(item.index, 10);
+                if (Number.isInteger(parsedIndex)) {
+                    targetIndex = parsedIndex;
+                }
+            }
+
+            if (targetIndex >= 0 && targetIndex < fieldCount) {
+                indexed[targetIndex] = item;
+            }
+        }
+        return indexed;
+    }
+
+    if (typeof rawAnswers === 'object') {
+        for (const [key, value] of Object.entries(rawAnswers)) {
+            const idx = Number.parseInt(key, 10);
+            if (Number.isInteger(idx) && idx >= 0 && idx < fieldCount) {
+                indexed[idx] = value;
+            }
+        }
+    }
+
+    return indexed;
+}
+
 async function resolveDragDropAnswerToId(rawValue) {
-    const raw = String(rawValue || '').trim();
-    if (!raw) {
+    let raw = rawValue;
+    if (raw && typeof raw === 'object') {
+        if (Object.prototype.hasOwnProperty.call(raw, 'id')) {
+            raw = raw.id;
+        } else if (Object.prototype.hasOwnProperty.call(raw, 'dragId')) {
+            raw = raw.dragId;
+        } else if (Object.prototype.hasOwnProperty.call(raw, 'value')) {
+            raw = raw.value;
+        } else if (Object.prototype.hasOwnProperty.call(raw, 'text')) {
+            raw = raw.text;
+        } else if (Object.prototype.hasOwnProperty.call(raw, 'label')) {
+            raw = raw.label;
+        }
+    }
+
+    const rawString = String(raw || '').trim();
+    const rawNormalized = normalizeLooseText(rawString);
+    if (!rawString || isAiNegativeValue(raw) || rawNormalized === 'false') {
         return false;
     }
 
     const dragElements = Array.from(document.querySelectorAll(taskFieldSelectors.dragDrop.drag));
     if (dragElements.length === 0) {
-        return raw;
+        return false;
     }
 
     const choices = [];
@@ -333,19 +417,19 @@ async function resolveDragDropAnswerToId(rawValue) {
         choices.push({ id, text, normalizedText: normalizeLooseText(text) });
     }
 
-    const byId = choices.find(choice => choice.id === raw);
+    const byId = choices.find(choice => String(choice.id || '').trim() === rawString);
     if (byId) {
         return byId.id;
     }
 
-    if (/^\d+$/.test(raw)) {
-        const idx = parseInt(raw, 10) - 1;
+    if (/^\d+$/.test(rawString)) {
+        const idx = parseInt(rawString, 10) - 1;
         if (idx >= 0 && idx < choices.length) {
             return choices[idx].id;
         }
     }
 
-    const normalizedRaw = normalizeLooseText(raw);
+    const normalizedRaw = normalizeLooseText(rawString);
     const byExactText = choices.find(choice => choice.normalizedText === normalizedRaw);
     if (byExactText) {
         return byExactText.id;
@@ -356,17 +440,15 @@ async function resolveDragDropAnswerToId(rawValue) {
         return byPartialText.id;
     }
 
-    return raw;
+    return false;
 }
 
 async function normalizeGeminiAnswers(task, rawAnswers) {
-    if (!Array.isArray(rawAnswers) || rawAnswers.length !== task.answerFields.length) {
-        throw new Error('Az AI válasz tömb hossza eltér a mezők számától');
-    }
+    const indexedRawAnswers = toIndexedRawAnswers(rawAnswers, task.answerFields.length);
 
     const normalizedAnswers = [];
-    for (let index = 0; index < rawAnswers.length; index++) {
-        const answerItem = rawAnswers[index];
+    for (let index = 0; index < indexedRawAnswers.length; index++) {
+        const answerItem = indexedRawAnswers[index];
         const answer = extractAiAnswerValue(answerItem);
         const fieldType = task.answerFields[index].type;
 
@@ -377,14 +459,25 @@ async function normalizeGeminiAnswers(task, rawAnswers) {
             }
             if (typeof answer === 'string') {
                 const normalized = normalizeLooseText(answer);
-                normalizedAnswers.push(normalized === 'true' || normalized === '1' || normalized === 'igen');
+                normalizedAnswers.push(
+                    normalized === 'true' ||
+                    normalized === '1' ||
+                    normalized === 'igen' ||
+                    normalized === 'yes' ||
+                    normalized === 'selected' ||
+                    normalized === 'checked'
+                );
+                continue;
+            }
+            if (typeof answer === 'number') {
+                normalizedAnswers.push(answer > 0);
                 continue;
             }
             normalizedAnswers.push(false);
             continue;
         }
 
-        if (answer === false || answer === null || typeof answer === 'undefined') {
+        if (isAiNegativeValue(answer)) {
             normalizedAnswers.push(false);
             continue;
         }
@@ -403,9 +496,15 @@ async function normalizeGeminiAnswers(task, rawAnswers) {
             }
 
             const target = task.answerFields[index].element;
-            const available = Array.from(target.querySelectorAll('span.ng-value-label, div.ng-placeholder'))
-                .map(el => (el.textContent || '').trim())
-                .filter(Boolean);
+            const available = await getDropdownOptionsForAI(target);
+
+            if (/^\d+$/.test(raw) && available.length > 0) {
+                const idx = parseInt(raw, 10) - 1;
+                if (idx >= 0 && idx < available.length) {
+                    normalizedAnswers.push(available[idx]);
+                    continue;
+                }
+            }
 
             if (available.length === 0) {
                 normalizedAnswers.push(raw);
@@ -423,7 +522,24 @@ async function normalizeGeminiAnswers(task, rawAnswers) {
                 const normalizedOption = normalizeLooseText(option);
                 return normalizedOption.includes(normalizedRaw) || normalizedRaw.includes(normalizedOption);
             });
-            normalizedAnswers.push(partial || raw);
+            normalizedAnswers.push(partial || false);
+            continue;
+        }
+
+        if (fieldType === 'customNumber') {
+            if (typeof answer === 'number' && Number.isFinite(answer)) {
+                normalizedAnswers.push(String(answer));
+                continue;
+            }
+
+            const normalized = String(answer).trim().replace(',', '.').replace(/\s+/g, '');
+            if (!normalized) {
+                normalizedAnswers.push(false);
+                continue;
+            }
+
+            const numeric = Number(normalized);
+            normalizedAnswers.push(Number.isFinite(numeric) ? normalized : false);
             continue;
         }
 
@@ -529,10 +645,7 @@ async function tryAiFallbackFill(task, taskFillStatus, reasonText, autoNextEnabl
     }
 }
 
-/**
- * Check if API minimum values have changed and update settings if needed
- * Warns user if current settings conflict with new API minimums
- */
+
 async function checkAndUpdateApiMinimums() {
     const apiMinValues = await fetchMinSettings(settings.url);
     
@@ -544,7 +657,6 @@ async function checkAndUpdateApiMinimums() {
     debugLog('API min values:', apiMinValues);
     debugLog('Stored min values - minvotes:', settings.apiMinvotes, 'votepercentage:', settings.apiVotepercentage);
     
-    // Check if API values have changed
     const minvotesChanged = apiMinValues.minvotes !== settings.apiMinvotes;
     const votepercentageChanged = apiMinValues.votepercentage !== settings.apiVotepercentage;
     
@@ -559,7 +671,6 @@ async function checkAndUpdateApiMinimums() {
         let warningMessage = '';
         let hasConflict = false;
         
-        // Check for conflicts with current minvotes setting
         if (minvotesChanged && apiMinValues.minvotes > settings.minvotes) {
             debugLog('minvotes conflict detected');
             updatedSettings.minvotes = apiMinValues.minvotes;
@@ -567,21 +678,18 @@ async function checkAndUpdateApiMinimums() {
             hasConflict = true;
         }
         
-        // Check for conflicts with current votepercentage setting
-        if (votepercentageChanged && apiMinValues.votepercentage > (settings.votepercentage / 100.0)) {
+        if (!settings.riskOverrideVotepercentage && votepercentageChanged && apiMinValues.votepercentage > (settings.votepercentage / 100.0)) {
             debugLog('votepercentage conflict detected');
             updatedSettings.votepercentage = apiMinValues.votepercentage;
             warningMessage += `Azonos válasz aránya frissítve: ${(apiMinValues.votepercentage * 100).toFixed(1)}%. `;
             hasConflict = true;
         }
         
-        // Save updated settings if there were changes
         if (Object.keys(updatedSettings).length > 0) {
             chrome.storage.sync.set(updatedSettings, function() {
                 debugLog('Updated settings saved:', updatedSettings);
             });
             
-            // Reload the settings in memory
             settings.apiMinvotes = apiMinValues.minvotes;
             settings.apiVotepercentage = apiMinValues.votepercentage;
             if (updatedSettings.minvotes) {
@@ -592,7 +700,6 @@ async function checkAndUpdateApiMinimums() {
             }
         }
         
-        // Show warning to user if there was a conflict
         if (hasConflict) {
             warningMessage += 'A beállítások az API minimumok szerint frissültek.';
             debugLog('Showing warning:', warningMessage);
@@ -617,7 +724,7 @@ async function fetchAnnouncements() {
             debugLog('Announcements fetched:', announcements);
             if (announcements === null) {
                 debugLog('No new announcements found.');
-                return false; // Return false if no new announcements
+                return false;
             }
             const huDateTimeFormatter = new Intl.DateTimeFormat('hu-HU', {
                 dateStyle: 'long',
@@ -639,10 +746,9 @@ async function fetchAnnouncements() {
                 items.lastAnnouncement = lastDate.toISOString();
             }
             chrome.storage.sync.set({lastAnnouncement: items.lastAnnouncement});
-            return true; // Return true if an announcement was found
+            return true;
         } else {
             console.error('Failed to fetch announcement:', response.status, response.error);
-            //throw new Error('Failed to fetch announcement:', response.error);
         }
         
     });
@@ -666,7 +772,6 @@ function getWebSocketUrl() {
 }
 let connectionPending = false;
 function connectWebSocket() {
-    // If a connection is already pending, wait for it to complete
     if (connectionPending) {
         return new Promise((resolve, reject) => {
             const checkConnection = setInterval(() => {
@@ -675,7 +780,6 @@ function connectWebSocket() {
                     resolve();
                 }
             }, 150);
-            // Timeout after 30 seconds
             setTimeout(() => {
                 clearInterval(checkConnection);
                 reject(new Error('WebSocket connection pending timeout'));
@@ -704,7 +808,6 @@ function connectWebSocket() {
             }
             
             wsGlobal.onmessage = event => {
-                //console.log('WebSocket message received:', event.data);
                 try {
                     const response = JSON.parse(event.data);
                      if (response.id && reqList.has(response.id)) {
@@ -748,7 +851,7 @@ async function sendRequestToWebSocket(request) {
                 reqList.delete(request.id);
                 reject(new Error("WebSocket response timeout"));
             }
-        }, 12000); // 12 second timeout
+        }, 12000);
 
         reqList.set(request.id, (response) => {
             clearTimeout(timeoutId);
@@ -760,11 +863,9 @@ async function sendRequestToWebSocket(request) {
 }
 
 async function initialize() {
-    //load stored settings on startup
     let settings_task = new taskStatus('beállítások betöltése');
     try {
         await loadSettings();
-        // Check and update API minimum values
         await checkAndUpdateApiMinimums();
         settings_task.succeed();
     } catch (error) {
@@ -784,9 +885,8 @@ async function initialize() {
 });
     }
 
-    // Connect to background and retry on failure with increasing timeouts
-    let retryTimeout = 500; // ms
-    const maxRetryTimeout = 8000; // ms
+    let retryTimeout = 500;
+    const maxRetryTimeout = 8000; 
     let retryCnt = 0;
     const maxRetryCnt = 5;
     let connectStatus = new taskStatus('kapcsolódás a szerverhez...', 'processing');
@@ -794,7 +894,7 @@ async function initialize() {
         try {
             await connectWebSocket();
             connectStatus.succeed();
-            break; // connected
+            break;
         } catch (err) {
             debugLog('connectWebSocket failed:', err);
             retryCnt++;
@@ -995,8 +1095,11 @@ async function tryAutoFillTask(task, taskFillStatus, autoNext) {
         await writeAnswersWithRetry(task, parsedAnswers, 2);
         taskFillStatus.succeed({ text: 'válasz beírása kész' });
     } catch (error) {
-        taskFillStatus.error({ text: `kitöltés sikertelen: ${getErrorMessage(error)}` });
-        debugLog('Autofill write failed:', error);
+        debugLog('Autofill write failed, trying AI fallback:', error);
+        const aiFilled = await tryAiFallbackFill(task, taskFillStatus, `szerveres válasz beírási hiba: ${getErrorMessage(error)}`, autoNext);
+        if (aiFilled === null || aiFilled === false) {
+            taskFillStatus.error({ text: `kitöltés sikertelen: ${getErrorMessage(error)}` });
+        }
         return;
     }
 
@@ -1009,12 +1112,6 @@ async function tryAutoFillTask(task, taskFillStatus, autoNext) {
     }
 }
 
-/**
- * Duplicates a button, gives it new text/action, and places it next to the original.
- * @param {string} selector - CSS selector to find the original button.
- * @param {string} newText - The text for the new button.
- * @param {Function} onClickCallback - The function to run when clicked.
- */
 let customBtnId = 0;
 function addCustomButton(originalBtn, newText, description, onClickCallback) {
     
@@ -1033,18 +1130,16 @@ function addCustomButton(originalBtn, newText, description, onClickCallback) {
     newBtn.removeAttribute('onclick');
 
     newBtn.addEventListener('click', (e) => {
-        e.preventDefault(); // Stop default form submissions/navigation
-        e.stopPropagation(); // Stop page scripts from seeing the click
+        e.preventDefault();
+        e.stopPropagation();
         onClickCallback(e);
     });
 
-    // Mark this button as a tekaku custom button for reliable selection
     newBtn.setAttribute('data-tekaku-btn', 'true');
     
     originalBtn.insertAdjacentElement('beforebegin', newBtn);
     newBtn.style.marginLeft = "10px"; 
     
-    // Apply hidden state if UI is hidden
     if (isUIHidden()) {
         newBtn.style.display = 'none';
     }
@@ -1074,13 +1169,9 @@ async function main_loop() {
     let last_url = '';
     let url = '';
     let currentTask = null;
-    /**
-     * Stores the answers filled in the current task when task is first loaded to detect changes
-     * @type {Array<answerField>}
-     */
+
     let taskFilledAnswers = [];
 
-    // Only add event listeners once to prevent memory leaks
     if (!eventListenersInitialized) {
         eventListenersInitialized = true;
 
@@ -1088,7 +1179,6 @@ async function main_loop() {
             if (document.getElementById('__input-blocker') || currentTask === null) return;
             try {
                 updateSelectedAnswers(currentTask, event);
-                // a 'lezárás' gomb ilyen, ekkor elküldjük az utolsó feladatot, mivel nem lesz következő amit érzékelünk
                 if (event.target.classList.contains('btn-danger')) { 
                     if (settings.isContributor && !cancelTaskSync && currentTask != null && hasAnswers(currentTask.answerFields) && JSON.stringify(taskFilledAnswers) !== JSON.stringify(currentTask.answerFields.map(input => input.value))) {
 
@@ -1161,10 +1251,10 @@ async function main_loop() {
             debugLog('current task ID: ', await getTaskUniqueID());
         }
     });
-    } // End of eventListenersInitialized block
+    }
     
     while (true) {
-        if (currentTask) await detectUrlChange(); //if no task yet, we should immediately see if there is one
+        if (currentTask) await detectUrlChange();
         
         let getTaskStatus = new taskStatus('feladatra várakozás...', 'processing');
 

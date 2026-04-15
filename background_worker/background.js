@@ -1,9 +1,3 @@
-/* global chrome */
-
-/**
- * Generate a unique installation key
- * Used to identify this specific extension installation
- */
 function generateInstallationKey() {
   const timestamp = Date.now().toString(36);
   const randomPart = Math.random().toString(36).substring(2, 15);
@@ -12,7 +6,7 @@ function generateInstallationKey() {
 
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === chrome.runtime.OnInstalledReason.INSTALL) {
-    // Generate and store unique installation key
+
     const installationKey = generateInstallationKey();
     chrome.storage.sync.set({ 
         installationKey: installationKey,
